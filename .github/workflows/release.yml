@@ -1,0 +1,53 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - run: bun install --frozen-lockfile
+
+      # The released tarball must carry the bundle that its source produces.
+      - run: bun run build:client
+      - run: git diff --exit-code -- lib/client.js
+      - run: node scripts/check-client.mjs
+
+      # npm provenance ties the published artifact to this repository, so the
+      # repository fields are read from `origin` rather than guessed.
+      - run: node scripts/set-repo.mjs
+
+      - name: Tag agrees with package.json
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$expected" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $expected" >&2
+            exit 1
+          fi
+
+      # Requires an NPM_TOKEN secret, or npm trusted publishing configured for
+      # this repository. `provenance` needs the id-token permission set above.
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - run: npm pack
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dsh-newapi-*.tgz
+          generate_release_notes: true

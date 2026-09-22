@@ -1,0 +1,79 @@
+{
+  "name": "dsh-newapi",
+  "version": "0.1.0",
+  "description": "Runs a local New API gateway as a managed DeepSeek Harness sidecar, provisions it on first start, and gives DeepSeek Harness and Claude Code one place to use it.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": {
+      "default": "./index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "license": "AGPL-3.0",
+  "author": "dsh-newapi contributors",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "new-api",
+    "gateway",
+    "claude-code"
+  ],
+  "files": [
+    "index.js",
+    "lib",
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "build:client": "bun scripts/build-client.mjs",
+    "check:binary": "node scripts/check-binary.mjs",
+    "check:boot": "node scripts/check-boot.mjs",
+    "check:client": "node scripts/check-client.mjs",
+    "check:config": "node scripts/check-config.mjs",
+    "check:net": "node scripts/check-net.mjs",
+    "check:provider": "node scripts/check-provider.mjs",
+    "check:retry": "node scripts/check-retry.mjs",
+    "check:setup": "node scripts/check-setup.mjs",
+    "check:startup": "node scripts/check-startup.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "prepack": "bun scripts/build-client.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

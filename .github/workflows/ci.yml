@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: bundle and panel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: bun install --frozen-lockfile
+      # The Harness client module system loads `lib/client.js` by name, so the
+      # committed artifact is the shipped code. Rebuilding it here and requiring
+      # no diff is what keeps it from drifting away from `src/client/index.jsx`.
+      - name: Browser bundle matches its source
+        run: |
+          bun run build:client
+          git diff --exit-code -- lib/client.js
+      - name: Panel registers and renders
+        run: node scripts/check-client.mjs
+      - name: Plugin rows are read and refused correctly
+        run: node scripts/check-config.mjs
+      - name: First-run settings are gated and validated
+        run: node scripts/check-setup.mjs
+      - name: The model configuration gets a correct route and no key
+        run: node scripts/check-provider.mjs
+      - name: A local binary wins over the download
+        run: node scripts/check-binary.mjs
+      - name: A failed start leaves nothing running
+        run: node scripts/check-startup.mjs
+      - name: A boot reports its steps, and a retry runs one again
+        run: node scripts/check-boot.mjs
+      - name: The release download finds and uses this machine's proxy
+        run: node scripts/check-net.mjs
+      - name: A failed install can be retried from the panel
+        run: node scripts/check-retry.mjs
+
+  smoke:
+    name: real gateway end to end
+    # Downloads the ~130 MB release binary; run it on purpose, not on every push.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: bun install --frozen-lockfile
+      - run: node scripts/smoke.mjs

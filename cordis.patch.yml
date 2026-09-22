@@ -1,0 +1,4 @@
+# dsh bundle patch: inserts the New API gateway sidecar into a profile's layer stack.
+- insert:
+    - id: newapi
+      name: 'dsh-newapi'
