@@ -44,6 +44,9 @@ check('the model configuration is published by default', () => {
   // own model tags or the harness' catalogs — and a model nothing describes takes
   // image input, because the gateway serves the models its operator added.
   assert.equal(defaults.providerImageModels, '')
+  // No alias either: the curated pairings are the plugin's own, and a model a
+  // gateway serves under a relay's id reaches them without configuration.
+  assert.equal(defaults.providerModelAliases, '')
   assert.equal(defaults.providerDefaultInput, 'text,image')
 })
 
@@ -63,6 +66,18 @@ check('the models accepting images are read from the row', () => {
   // A name with whitespace inside is commas typed as spaces.
   assert.throws(() => resolveConfig({ providerImageModels: 'glm-5.3 mimo-v2.6-pro' }), /whitespace.*separate model ids with commas/)
   assert.throws(() => resolveConfig({ providerImageModels: 5 }), /config\.providerImageModels must be a string/)
+})
+
+check('the model aliases are read from the row, and a typo is refused', () => {
+  assert.equal(resolveConfig({ providerModelAliases: 'deepseek-v4.1-flash=deepseek-flash' }).providerModelAliases, 'deepseek-v4.1-flash=deepseek-flash')
+  assert.equal(resolveConfig({ providerModelAliases: '' }).providerModelAliases, '')
+  // An entry that is not a pair names no model at all, which is a silent no-op.
+  assert.throws(() => resolveConfig({ providerModelAliases: 'deepseek-v4.1-flash' }), /not a pair.*served-id=catalog-id/)
+  assert.throws(() => resolveConfig({ providerModelAliases: 'deepseek-flash=' }), /not a pair/)
+  // An id aliased to itself states nothing, and reads as a mistake.
+  assert.throws(() => resolveConfig({ providerModelAliases: 'same=same' }), /aliases "same" to itself/)
+  assert.throws(() => resolveConfig({ providerModelAliases: 'a=b c' }), /whitespace.*two ids with/)
+  assert.throws(() => resolveConfig({ providerModelAliases: 7 }), /config\.providerModelAliases must be a string/)
 })
 
 check('a thinking level nobody offers is refused where the row is read', () => {

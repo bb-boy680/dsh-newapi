@@ -29,8 +29,8 @@ import { changeGatewayRootPassword, provisionGateway, verifyGatewayToken } from 
 import { makeRoutes } from './src/routes.js'
 import { needsFirstRunSetup } from './src/setup.js'
 import { startConsoleProxy } from './src/proxy.js'
-import { publishGatewayProvider, parseReasoningEfforts, parseImageModels, parseDefaultInput } from './src/llmprovider.js'
-import { readCatalogModels, readTaggedModels, resolveCapacities, resolveImageModels } from './src/modalities.js'
+import { publishGatewayProvider, parseReasoningEfforts, parseImageModels, parseModelAliases, parseDefaultInput } from './src/llmprovider.js'
+import { readCatalogModels, readTaggedModels, resolveAliasedCapacities, resolveCapacities, resolveImageModels, resolveModelAliases } from './src/modalities.js'
 
 export const name = 'newapi'
 export const inject = ['subprocess']
@@ -61,6 +61,7 @@ const FIELDS = {
   providerMaxTokens: { kind: 'number', fallback: 32768 },
   providerReasoningEfforts: { kind: 'string', fallback: 'off,low,medium,high,xhigh,max' },
   providerImageModels: { kind: 'string', fallback: '' },
+  providerModelAliases: { kind: 'string', fallback: '' },
   providerDefaultInput: { kind: 'string', fallback: 'text,image' },
 }
 
@@ -103,6 +104,18 @@ export function resolveConfig(raw) {
     )
   }
   parseDefaultInput(config.providerDefaultInput)
+  // The aliases: an entry that is not a `served=catalog` pair, or one that aliases
+  // an id to itself, is a typo that would otherwise leave the model exactly as
+  // undescribed as before. A whitespace inside either id is the same mistake the
+  // image list refuses — commas and `=` typed as spaces.
+  const aliases = parseModelAliases(config.providerModelAliases)
+  const spacedAliases = [...aliases].flat().filter((name) => /\s/.test(name))
+  if (spacedAliases.length > 0) {
+    throw new Error(
+      `newapi: config.providerModelAliases names ${spacedAliases.join(', ')}, which contain whitespace;`
+      + ' separate pairs with commas and the two ids with "="',
+    )
+  }
   return config
 }
 
@@ -281,9 +294,19 @@ async function publishProvider(ctx, config, facts) {
     // The two sources that can answer on their own follow the gateway's own model
     // list, so a model added in the New API console (and tagged there, when it
     // reads images) needs nothing on this side.
+    //
+    // An alias target joins the read even though the gateway does not serve it: a
+    // model reached under a relay's own id is described by the catalogs under
+    // theirs, and an id nobody serves is never read otherwise.
+    const aliases = resolveModelAliases(parseModelAliases(config.providerModelAliases))
     const tagged = await readTaggedModels(facts.baseUrl, facts.models)
-    const catalog = await readCatalogModels(ctx.get('llm'), facts.models, config.providerName)
-    const capacities = resolveCapacities(catalog.models, facts.models)
+    const catalog = await readCatalogModels(
+      ctx.get('llm'),
+      [...new Set([...facts.models, ...aliases.values()])],
+      config.providerName,
+    )
+    const stated = resolveCapacities(catalog.models, facts.models)
+    const capacities = resolveAliasedCapacities(stated, catalog.models, aliases, facts.models)
     const images = resolveImageModels({
       models: facts.models,
       claim: parseImageModels(config.providerImageModels),
@@ -307,7 +330,7 @@ async function publishProvider(ctx, config, facts) {
       maxTokens: config.providerMaxTokens,
       efforts: parseReasoningEfforts(config.providerReasoningEfforts),
       imageModels: images.declared,
-      capacities,
+      capacities: capacities.capacities,
     })
     log(
       `model configuration: ${published.models} models are selectable as provider "${published.route}" `
@@ -339,20 +362,34 @@ async function publishProvider(ctx, config, facts) {
     // Which models carry a stated capacity and which fall back is the difference
     // between a number a catalog knows and the route's one guess, and it is the
     // only place that distinction is visible: the settings document shows both
-    // spellings the same way.
+    // spellings the same way. An alias and a number the route already carried are
+    // the other two cases, and each is reported as what it is rather than as a
+    // catalog fact about the id.
+    const spelled = ({ id, contextWindow, maxTokens }) => `${id} ${contextWindow ?? '?'} in/${maxTokens ?? '?'} out`
     log(
       'capacities: '
-      + (published.capacities.length === 0
-        ? 'no catalog states one'
-        : published.capacities
-            .map(({ id, contextWindow, maxTokens }) =>
-              `${id} ${contextWindow ?? '?'} in/${maxTokens ?? '?'} out`)
-            .join(', ')),
+      + (stated.size === 0 ? 'no catalog states one' : [...stated].map(([id, known]) => spelled({ id, ...known })).join(', ')),
     )
-    const guessed = facts.models.filter((id) => !capacities.has(id))
+    if (capacities.aliased.length > 0) {
+      log(
+        'capacities: '
+        + capacities.aliased.map(({ id, as, contextWindow, maxTokens }) =>
+          `${spelled({ id, contextWindow, maxTokens })} are what the catalogs state for ${as}`).join(', '),
+      )
+    }
+    if (published.carriedCapacities.length > 0) {
+      log(
+        'capacities: '
+        + published.carriedCapacities.map(spelled).join(', ')
+        + ' are kept from this route\'s own profile; no catalog restates those models',
+      )
+    }
+    const carried = new Set(published.carriedCapacities.map(({ id }) => id))
+    const guessed = facts.models.filter((id) => !capacities.capacities.has(id) && !carried.has(id))
     if (guessed.length > 0) {
-      // Named so the guess is visible: raising the route's defaults is the only
-      // way these get a truer number, because nothing on this side knows one.
+      // Named so the guess is visible: nothing on this side knows a number for
+      // these, so the row's own fields (set once in 「设置 → 模型」, and carried
+      // over from then on) or the route's defaults are the only answers there are.
       log(
         `capacities: nothing states one for ${guessed.join(', ')};`
         + ` they take providerContextWindow/providerMaxTokens (${config.providerContextWindow} in/${config.providerMaxTokens} out)`,

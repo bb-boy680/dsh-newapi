@@ -25,11 +25,36 @@
  * whose models are described by id from guessing one number for all of them
  * (see {@link resolveCapacities}).
  *
+ * A relay renames what it resells, so an id the catalogs never heard can still be
+ * a model they describe: {@link MODEL_ALIASES} states those pairings, and the
+ * capacity read follows one to the entry its target carries
+ * (see {@link resolveAliasedCapacities}). Modalities deliberately do not: an alias
+ * says two ids are one model, and a target that calls the model text-only would
+ * then silently withdraw image input that nothing else asked it to withdraw.
+ *
  * @module dsh-newapi/modalities
  */
 
 /** Tag spellings, lowercased, that mean "this model reads images". */
 const IMAGE_TAGS = new Set(['vision', 'vlm', 'multimodal', 'multi-modal', '多模态', '视觉', '图像'])
+
+/**
+ * The served ids this plugin knows name a model the installed catalogs describe
+ * under another id, curated one model at a time.
+ *
+ * A gateway aggregates relays, and a relay names a model its own way: DeepSeek V4.1
+ * Flash reaches DSH as `deepseek-v4.1-flash` through one channel and as
+ * `deepseek-flash` through another, while the catalogs know only the latter. The
+ * pairing is stated here rather than guessed from the spelling — a similarity rule
+ * would hand one model's limits to another — and only where the two ids are the
+ * same model beyond doubt. A deployment that serves a spelling nothing here names
+ * adds it on its own row (`providerModelAliases`), which outranks this table.
+ */
+export const MODEL_ALIASES = new Map([
+  // The catalogs' own name for it: llm-deepseek ships `deepseek-flash` as
+  // "DeepSeek-V41-Flash", and the relay spells that name out in the id.
+  ['deepseek-v4.1-flash', 'deepseek-flash'],
+])
 
 /**
  * Whether one model's New API tag string claims image input. Tags are free text
@@ -316,4 +341,54 @@ export function resolveCapacities(catalog, models) {
     if (Object.keys(known).length > 0) capacities.set(id, known)
   }
   return capacities
+}
+
+/**
+ * The alias table this run follows: the curated pairings under the row's own.
+ *
+ * The row wins so a deployment can correct the table — a spelling curated here may
+ * be wrong for the upstream behind this gateway, and a relay whose id nothing here
+ * names is exactly what the row exists for.
+ * @param row - the pairings the plugin row named, served id → catalog id.
+ * @returns every pairing this run knows, the row's taken last.
+ */
+export function resolveModelAliases(row = new Map()) {
+  return new Map([...MODEL_ALIASES, ...row])
+}
+
+/**
+ * The capacities the served models take from the catalog entry their alias names.
+ *
+ * A gateway resells what a relay calls a model; the catalogs describe that model
+ * under the relay's or the vendor's own id. The alias states which id that is, and
+ * the numbers are the ones the catalogs already state for it — nothing is invented
+ * here, and an alias whose target no catalog describes adds nothing, which leaves
+ * the model to whatever the route already carries.
+ *
+ * A capacity stated for the served id itself is never replaced: the alias fills the
+ * fields that id's own entry leaves open, per field, and states nothing where the
+ * target is silent.
+ * @param capacities - the per-model capacities the catalogs stated by id, from {@link resolveCapacities}.
+ * @param catalog - each read model's catalog entry, from {@link readCatalogModels}.
+ * @param aliases - served id → catalog id, from {@link resolveModelAliases}.
+ * @param models - the model ids the gateway currently serves.
+ * @returns the capacities to declare, and the models that took them from an alias.
+ */
+export function resolveAliasedCapacities(capacities, catalog, aliases, models) {
+  const declared = new Map(capacities)
+  const aliased = []
+  for (const id of models) {
+    const target = aliases.get(id)
+    if (target === undefined || target === id) continue
+    const stated = capacities.get(id) ?? {}
+    const entry = catalog.get(target)
+    const taken = {
+      ...stated.contextWindow === undefined && isCapacity(entry?.contextWindow) ? { contextWindow: entry.contextWindow } : {},
+      ...stated.maxTokens === undefined && isCapacity(entry?.maxTokens) ? { maxTokens: entry.maxTokens } : {},
+    }
+    if (Object.keys(taken).length === 0) continue
+    declared.set(id, { ...stated, ...taken })
+    aliased.push({ id, as: target, ...taken })
+  }
+  return { capacities: declared, aliased }
 }

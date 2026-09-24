@@ -17,7 +17,10 @@
  * metadata has no field to put one in. So both come from the installed model
  * catalogs, which describe a served model by id
  * ({@link module:dsh-newapi/modalities}), and the route's configurable guesses are
- * what a model nothing describes keeps.
+ * what a model nothing describes keeps — except for the numbers the route itself
+ * already carries, which a write here keeps instead of deleting. A gateway that
+ * serves a relay's own spelling of a model (`deepseek-v4.1-flash`, say) matches no
+ * catalog, and the operator's answer for it is the only one there is.
  */
 
 /** Settings namespace the pi-ai adapter owns; the Models page writes the same one. */
@@ -97,6 +100,38 @@ export function parseImageModels(raw) {
 
 /** The request modalities a profile may name, in pi-ai's order. */
 const MODALITIES = ['text', 'image']
+
+/**
+ * Read the model-id aliases from one plugin-row string.
+ *
+ * A gateway resells what a relay calls a model, and the harness' catalogs describe
+ * that model under the id they know it by — so the row can state which catalog id a
+ * served id *is*, and the capacity read follows the pairing. Nothing is inferred
+ * from the spelling: an id that merely looks similar is a different model, and
+ * handing it another model's limits is the failure the alias exists to avoid.
+ * @param raw - comma-separated `served-id=catalog-id` pairs, or empty.
+ * @returns served id → catalog id, in the order the row names them.
+ * @throws {Error} naming an entry that is not a pair, or one that aliases an id to itself.
+ */
+export function parseModelAliases(raw) {
+  const aliases = new Map()
+  for (const token of raw.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0)) {
+    const equals = token.indexOf('=')
+    const served = equals === -1 ? '' : token.slice(0, equals).trim()
+    const target = equals === -1 ? '' : token.slice(equals + 1).trim()
+    if (served.length === 0 || target.length === 0) {
+      throw new Error(
+        `newapi: providerModelAliases names "${token}", which is not a pair;`
+        + ' expected a comma-separated list of "served-id=catalog-id"',
+      )
+    }
+    if (served === target) {
+      throw new Error(`newapi: providerModelAliases aliases "${served}" to itself, which states nothing`)
+    }
+    aliases.set(served, target)
+  }
+  return aliases
+}
 
 /**
  * Read the input types an undescribed model gets from the plugin row.
@@ -209,6 +244,89 @@ function modelCapacity(known) {
   }
 }
 
+/** Whether a reported capacity is one a profile may carry: a positive whole token count. */
+function isTokenCount(value) {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
+/**
+ * The capacities the route's profile already states, keyed by model id.
+ *
+ * Nothing on the wire states a token limit and no catalog describes every id a
+ * gateway may serve — a relay's own spelling of a model matches neither — so the
+ * number a person typed for such a model in 「设置 → 模型」 is the only answer that
+ * exists. Reading it back is what keeps a write from deleting it: the model list
+ * is replaced wholesale, and a capacity nobody restates would otherwise revert the
+ * model to the route's guess on every sync.
+ *
+ * The read is the resolved settings view, so it is the profile in force rather
+ * than the last thing this plugin wrote. Both it and the document it comes from
+ * are advisory: a seam that cannot answer costs the carried numbers, never the
+ * route.
+ * @param settings - the settings seam, when the harness mounts one.
+ * @param route - the provider route this plugin registers.
+ * @returns the capacities that route currently declares; empty when nothing states one.
+ */
+function storedCapacities(settings, route) {
+  if (typeof settings?.describe !== 'function') return new Map()
+  let view
+  try {
+    view = settings.describe({ redactSecrets: true })
+  } catch {
+    return new Map()
+  }
+  const value = (Array.isArray(view) ? view : []).find((row) => row?.ns === PROVIDER_NS)?.value
+  const models = value?.providers?.[route]?.models
+  if (!Array.isArray(models)) return new Map()
+  const stored = new Map()
+  for (const entry of models) {
+    if (typeof entry?.id !== 'string' || entry.id.length === 0) continue
+    const known = {
+      ...isTokenCount(entry.contextWindow) ? { contextWindow: entry.contextWindow } : {},
+      ...isTokenCount(entry.maxTokens) ? { maxTokens: entry.maxTokens } : {},
+    }
+    if (Object.keys(known).length > 0) stored.set(entry.id, known)
+  }
+  return stored
+}
+
+/**
+ * Fold the numbers the route already carries under the ones this read states.
+ *
+ * The catalogs win field by field, so a corrected catalog fact still lands; a
+ * field no catalog states keeps what the route has instead of being dropped. Only
+ * the models the gateway still serves are considered — a capacity kept for an id
+ * that is gone would be a claim about a model this route no longer carries. The
+ * two are reported apart ({@link publishGatewayProvider}) because they are not the
+ * same claim: one is what a catalog says about the model, the other is what this
+ * deployment decided for an id nothing describes.
+ * @param capacities - the per-model capacities the catalog read stated just now.
+ * @param stored - the per-model capacities the route's profile already carries.
+ * @param models - the model ids the gateway currently serves.
+ * @returns the capacities to declare, and the per-model fields that came from the profile.
+ */
+function withStoredCapacities(capacities, stored, models) {
+  const served = new Set(models)
+  const merged = new Map()
+  for (const source of [stored, capacities]) {
+    for (const [id, known] of source) {
+      if (!served.has(id)) continue
+      merged.set(id, { ...merged.get(id), ...known })
+    }
+  }
+  const carried = []
+  for (const [id, known] of stored) {
+    if (!served.has(id)) continue
+    const stated = capacities.get(id) ?? {}
+    const fromProfile = {
+      ...stated.contextWindow !== undefined || known.contextWindow === undefined ? {} : { contextWindow: known.contextWindow },
+      ...stated.maxTokens !== undefined || known.maxTokens === undefined ? {} : { maxTokens: known.maxTokens },
+    }
+    if (Object.keys(fromProfile).length > 0) carried.push({ id, ...fromProfile })
+  }
+  return { capacities: merged, carried }
+}
+
 /**
  * The pi-ai wire facts every model on this route needs, named outright.
  *
@@ -240,9 +358,12 @@ function routeCompat(efforts) {
  *
  * The model list replaces whatever the route held, because the gateway is what
  * decides which models exist: a per-model edit made in 「设置 → 模型」 does not
- * survive the next start or sync.
+ * survive the next start or sync. The two capacity fields are the exception, and
+ * for a reason the list does not share: they are the only place a number for an id
+ * no catalog describes can live, so what the route already states is carried over
+ * wherever this read states nothing ({@link storedCapacities}).
  * @param options - the two seams, the route's identity, the gateway address, its token, the model ids, the capacity guesses, the offered thinking levels, the resolved models accepting images, and the resolved per-model capacities.
- * @returns what was published: the route key, the credential reference, the display name, the model count, the models declared image-capable, and the models carrying a stated capacity.
+ * @returns what was published: the route key, the credential reference, the display name, the model count, the models declared image-capable, the models a capacity was declared for, and the capacities kept from the route's own profile.
  * @throws {Error} when the gateway exposes no models, or either seam refuses the write.
  */
 export async function publishGatewayProvider(options) {
@@ -267,6 +388,7 @@ export async function publishGatewayProvider(options) {
   if (models.length === 0) {
     throw new Error('the gateway serves no models yet; add a channel in the New API console first')
   }
+  const declared = withStoredCapacities(capacities, storedCapacities(settings, route), models)
   await credentials.set(apiKeyRef, token)
   await settings.update(PROVIDER_NS, {
     providers: {
@@ -279,7 +401,7 @@ export async function publishGatewayProvider(options) {
         maxTokens,
         efforts,
         imageModels,
-        capacities,
+        capacities: declared.capacities,
       }),
     },
   })
@@ -291,5 +413,6 @@ export async function publishGatewayProvider(options) {
     efforts: [...efforts],
     imageModels: models.filter((id) => acceptsImages(id, imageModels)),
     capacities: [...capacities].map(([id, known]) => ({ id, ...known })),
+    carriedCapacities: declared.carried,
   }
 }

@@ -21,6 +21,9 @@
  * New API reports no token limit either, so a model the harness' own catalogs
  * describe has to carry the limit its id implies rather than the route's one
  * guess — a 1M-token model declared at 131072 loses context it could have held.
+ * The same asymmetry decides the other half: a model no catalog describes keeps
+ * the number the route already states for it, because a write that dropped it
+ * would silently hand that model back to the guess.
  *
  * Run from this package with: node scripts/check-provider.mjs
  */
@@ -28,16 +31,20 @@ import assert from 'node:assert/strict'
 import {
   parseDefaultInput,
   parseImageModels,
+  parseModelAliases,
   parseReasoningEfforts,
   providerProfile,
   publishGatewayProvider,
 } from '../src/llmprovider.js'
 import {
+  MODEL_ALIASES,
   catalogEntry,
   readCatalogModels,
   readTaggedModels,
+  resolveAliasedCapacities,
   resolveCapacities,
   resolveImageModels,
+  resolveModelAliases,
   tagsAcceptImages,
 } from '../src/modalities.js'
 
@@ -77,6 +84,19 @@ function seams(options = {}) {
       },
     },
     settings: {
+      // The resolved view the plugin reads back before it writes, so a capacity
+      // the route already states is carried instead of dropped. `stored` names the
+      // model rows that view holds; `noDescribe` is a composition whose settings
+      // seam mounts no reader, and `unreadable` one whose document cannot be read
+      // — either must cost the carried numbers and nothing else.
+      ...options.noDescribe === true
+        ? {}
+        : {
+            describe: () => {
+              if (options.unreadable === true) throw new Error('the settings document cannot be read')
+              return [{ ns: 'llm-pi-ai', value: { providers: { 'new-api': { models: options.stored ?? [] } } } }]
+            },
+          },
       update: async (ns, patch) => {
         calls.settings.push([ns, patch])
         if (options.refuseSettings === true) throw new Error('the adapter refused the route')
@@ -253,6 +273,82 @@ await check('the published result names the models that took a catalog capacity'
     ...stub,
   })
   assert.deepEqual(published.capacities, [{ id: 'deepseek-chat', contextWindow: 1000000, maxTokens: 384000 }])
+  assert.deepEqual(published.carriedCapacities, [])
+})
+
+await check('a capacity the route already states survives the sync', async () => {
+  // The case this exists for: the gateway serves a relay's own model id, no
+  // installed catalog describes it, and the number a person typed for it in the
+  // Models page is the only answer there is. The write must not delete it — the
+  // route's own fallback (131072/32768) is what an entry with no capacity gets,
+  // and that is a guess about a model nobody described.
+  const stub = seams({
+    stored: [
+      { id: 'deepseek-v4.1-flash', contextWindow: 1000000, maxTokens: 256000 },
+      { id: 'retired', contextWindow: 400000, maxTokens: 64000 },
+    ],
+  })
+  const published = await publishGatewayProvider({ ...gateway, models: ['deepseek-v4.1-flash', 'deepseek-chat'], ...stub })
+  const models = stub.calls.settings[0][1].providers['new-api'].models
+  assert.deepEqual(models[0], {
+    id: 'deepseek-v4.1-flash',
+    contextWindow: 1000000,
+    maxTokens: 256000,
+    reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+  })
+  // The model the catalogs describe still takes its own reading, and a model the
+  // gateway no longer serves carries nothing: the list stays the gateway's.
+  assert.deepEqual(models[1], {
+    id: 'deepseek-chat',
+    reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+  })
+  assert.deepEqual(published.carriedCapacities, [
+    { id: 'deepseek-v4.1-flash', contextWindow: 1000000, maxTokens: 256000 },
+  ])
+  // The route's guesses are untouched: they stay the answer for the models that
+  // carry nothing at all.
+  assert.equal(stub.calls.settings[0][1].providers['new-api'].defaultContextWindow, 131072)
+  assert.equal(stub.calls.settings[0][1].providers['new-api'].defaultMaxTokens, 32768)
+})
+
+await check('a catalog fact outranks the number the route carried', async () => {
+  // Field by field, so a corrected catalog reading still lands while the half it
+  // says nothing about is kept.
+  const stub = seams({ stored: [{ id: 'deepseek-chat', contextWindow: 1000000, maxTokens: 128000 }] })
+  const published = await publishGatewayProvider({
+    ...gateway,
+    capacities: new Map([['deepseek-chat', { contextWindow: 200000 }]]),
+    ...stub,
+  })
+  assert.deepEqual(stub.calls.settings[0][1].providers['new-api'].models[0], {
+    id: 'deepseek-chat',
+    contextWindow: 200000,
+    maxTokens: 128000,
+    reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+  })
+  assert.deepEqual(published.carriedCapacities, [{ id: 'deepseek-chat', maxTokens: 128000 }])
+})
+
+await check('a settings seam that cannot answer costs only the carried numbers', async () => {
+  for (const options of [{ noDescribe: true }, { unreadable: true }]) {
+    const stub = seams(options)
+    const published = await publishGatewayProvider({ ...gateway, ...stub })
+    assert.deepEqual(published.carriedCapacities, [], JSON.stringify(options))
+    assert.equal(stub.calls.settings.length, 1, JSON.stringify(options))
+    // Nothing stated a capacity, so the same profile as before is written.
+    assert.deepEqual(stub.calls.settings[0][1].providers['new-api'], providerProfile(gateway))
+  }
+})
+
+await check('a model the gateway no longer serves carries nothing over', async () => {
+  // The list is still the gateway's: a capacity for an id that is gone is not
+  // restated, so it leaves with the model.
+  const stub = seams({ stored: [{ id: 'retired', contextWindow: 1000000, maxTokens: 256000 }] })
+  const published = await publishGatewayProvider({ ...gateway, ...stub })
+  assert.deepEqual(published.carriedCapacities, [])
+  for (const model of stub.calls.settings[0][1].providers['new-api'].models) {
+    assert.equal('contextWindow' in model, false, model.id)
+  }
 })
 
 await check('publishing stores the key and registers the route', async () => {
@@ -266,6 +362,7 @@ await check('publishing stores the key and registers the route', async () => {
     efforts: gateway.efforts,
     imageModels: [],
     capacities: [],
+    carriedCapacities: [],
   })
   assert.deepEqual(stub.calls.credentials, [['NEW_API_KEY', TOKEN]])
   assert.equal(stub.calls.settings.length, 1)
@@ -278,6 +375,79 @@ await check('the settings document never carries the token', async () => {
   const stub = seams()
   await publishGatewayProvider({ ...gateway, ...stub })
   assert.equal(JSON.stringify(stub.calls.settings).includes(TOKEN), false)
+})
+
+console.log('--- which ids are another id in disguise ---')
+// A gateway aggregates relays, and a relay names a model its own way: DeepSeek V4.1
+// Flash arrives as `deepseek-v4.1-flash` through one channel and as `deepseek-flash`
+// through another, while the catalogs know only the latter. The pairing is curated
+// and stated (`providerModelAliases` outranks it), never guessed from the spelling,
+// and the numbers it yields are the target's own — first sync included.
+
+await check('the aliases are read as pairs, and a typo is refused', () => {
+  assert.deepEqual([...parseModelAliases('relay-id=catalog-id')], [['relay-id', 'catalog-id']])
+  assert.deepEqual([...parseModelAliases(' a = b , c=d ')], [['a', 'b'], ['c', 'd']])
+  assert.deepEqual([...parseModelAliases('')], [])
+  assert.throws(() => parseModelAliases('relay-id'), /not a pair.*served-id=catalog-id/)
+  assert.throws(() => parseModelAliases('relay-id='), /not a pair/)
+  assert.throws(() => parseModelAliases('=catalog-id'), /not a pair/)
+  assert.throws(() => parseModelAliases('same=same'), /aliases "same" to itself/)
+})
+
+await check('the curated pairings are the floor, and the row outranks them', () => {
+  // The one pairing the plugin states itself, because the id spells out the name
+  // the DeepSeek catalog gives the model.
+  assert.equal(MODEL_ALIASES.get('deepseek-v4.1-flash'), 'deepseek-flash')
+  assert.deepEqual([...resolveModelAliases()], [['deepseek-v4.1-flash', 'deepseek-flash']])
+  // A deployment whose upstream really is another model says so on its row.
+  assert.deepEqual(
+    [...resolveModelAliases(new Map([['deepseek-v4.1-flash', 'glm-5.3']]))],
+    [['deepseek-v4.1-flash', 'glm-5.3']],
+  )
+  assert.deepEqual(
+    [...resolveModelAliases(new Map([['my-relay-id', 'deepseek-v4-pro']]))],
+    [['deepseek-v4.1-flash', 'deepseek-flash'], ['my-relay-id', 'deepseek-v4-pro']],
+  )
+})
+
+await check('an alias lends the target its numbers, and invents nothing', () => {
+  const resolved = resolveAliasedCapacities(
+    new Map(),
+    new Map([['deepseek-flash', { images: true, contextWindow: 1000000, maxTokens: 256000 }]]),
+    resolveModelAliases(),
+    ['deepseek-v4.1-flash'],
+  )
+  assert.deepEqual([...resolved.capacities], [['deepseek-v4.1-flash', { contextWindow: 1000000, maxTokens: 256000 }]])
+  assert.deepEqual(resolved.aliased, [
+    { id: 'deepseek-v4.1-flash', as: 'deepseek-flash', contextWindow: 1000000, maxTokens: 256000 },
+  ])
+  // An alias whose target nothing describes adds nothing: the model keeps
+  // whatever the route already carries for it.
+  const undescribed = resolveAliasedCapacities(new Map(), new Map(), resolveModelAliases(), ['deepseek-v4.1-flash'])
+  assert.deepEqual([...undescribed.capacities], [])
+  assert.deepEqual(undescribed.aliased, [])
+})
+
+await check('an id’s own entry outranks the alias, per field', () => {
+  const aliases = new Map([['relay-id', 'known-id']])
+  const catalog = new Map([['known-id', { contextWindow: 1000000, maxTokens: 256000 }]])
+  const own = resolveAliasedCapacities(
+    new Map([['relay-id', { contextWindow: 8192 }]]),
+    catalog,
+    aliases,
+    ['relay-id'],
+  )
+  // The half the id states stays; the half it leaves open is filled.
+  assert.deepEqual([...own.capacities], [['relay-id', { contextWindow: 8192, maxTokens: 256000 }]])
+  assert.deepEqual(own.aliased, [{ id: 'relay-id', as: 'known-id', maxTokens: 256000 }])
+  const nothing = resolveAliasedCapacities(
+    new Map([['relay-id', { contextWindow: 1000000, maxTokens: 256000 }]]),
+    catalog,
+    aliases,
+    ['relay-id'],
+  )
+  assert.deepEqual([...nothing.capacities], [['relay-id', { contextWindow: 1000000, maxTokens: 256000 }]])
+  assert.deepEqual(nothing.aliased, [])
 })
 
 await check('a gateway with no models is not registered at all', async () => {
@@ -521,6 +691,32 @@ await check('a name the gateway does not serve is reported, not dropped in silen
   })
   assert.deepEqual(resolved.declared, ['served'])
   assert.deepEqual(resolved.unmatched, ['typo', 'gone'])
+})
+
+await check('an alias target is read even though this gateway does not serve it', async () => {
+  // The first sync of a gateway that resells DeepSeek V4.1 Flash under the relay's
+  // id: the id itself is in no catalog, the catalogs describe the model as
+  // `deepseek-flash`, and only the alias makes that entry reachable — which is why
+  // the target joins the read even though the gateway never advertises it.
+  const aliases = resolveModelAliases()
+  const served = ['deepseek-v4.1-flash']
+  const answer = await readCatalogModels(catalogSeam('new-api'), [...new Set([...served, ...aliases.values()])], 'new-api')
+  const stated = resolveCapacities(answer.models, served)
+  // Nothing describes the served id itself, which is the whole problem.
+  assert.deepEqual([...stated], [])
+  const resolved = resolveAliasedCapacities(stated, answer.models, aliases, served)
+  assert.deepEqual([...resolved.capacities], [['deepseek-v4.1-flash', { contextWindow: 1000000, maxTokens: 384000 }]])
+  assert.deepEqual(resolved.aliased, [
+    { id: 'deepseek-v4.1-flash', as: 'deepseek-flash', contextWindow: 1000000, maxTokens: 384000 },
+  ])
+  // The row's pairing is what a deployment whose upstream is another model uses,
+  // and the numbers that travel are that target's.
+  const remapped = resolveModelAliases(parseModelAliases('deepseek-v4.1-flash=glm-5.3'))
+  const other = await readCatalogModels(catalogSeam('new-api'), [...new Set([...served, ...remapped.values()])], 'new-api')
+  assert.deepEqual(
+    resolveAliasedCapacities(resolveCapacities(other.models, served), other.models, remapped, served).aliased,
+    [{ id: 'deepseek-v4.1-flash', as: 'glm-5.3', contextWindow: 1000000, maxTokens: 131072 }],
+  )
 })
 
 console.log(failures === 0 ? 'provider checks passed' : `${failures} provider check(s) FAILED`)

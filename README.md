@@ -65,7 +65,7 @@ New API is good. Running it is the annoying part.
 - **Publishes the gateway into DSH** — the gateway token goes to the credential service, the `new-api` route goes into `llm-pi-ai` settings, and the model list reaches the model selector. Add a channel in the console later, press Sync models once, and no DSH restart is needed.
 - **Declarable thinking levels** — `providerReasoningEfforts` states which levels the route offers (`off` / `low` / `medium` / `high` / `xhigh` / `max`) and pins the OpenAI dispatch format; an empty value declares no reasoning at all, which is the honest answer for upstreams that ignore the parameter.
 - **Image input decided by precedence** — the plugin row's `providerImageModels` (with `*` and `!` exclusions) → the model's own tag in the New API console (`vision` / `vlm` / `multimodal` / `多模态` / `视觉` …) → DSH's installed model catalogs (matched by id); a model nothing describes takes `providerDefaultInput`.
-- **Per-model capacity** — a model the installed catalogs describe keeps its own context window and output cap (the smallest any source states); the rest fall back to the route's `providerContextWindow` / `providerMaxTokens`.
+- **Per-model capacity** — a model the installed catalogs describe keeps its own context window and output cap (the smallest any source states); a model a relay renamed — `deepseek-v4.1-flash` for the catalogs' `deepseek-flash` — takes the numbers the catalogs state for the id it aliases, out of the box and already on the first sync; a model nothing describes keeps the numbers the route already states for it (what you typed in 「设置 → 模型」), and only a model that carries none of those falls back to the route's `providerContextWindow` / `providerMaxTokens`.
 - **Console session bridge** — the desktop shell serves its document from `dsh-app://`, which makes the embedded console a cross-site frame whose `SameSite=Strict` cookies the browser drops. The plugin runs a loopback reverse proxy that owns one real gateway session for the account a person signed in with, so the console stops falling back to its sign-in page.
 - **Classified, retryable failures** — three boot attempts (5s / 15s apart); if they are spent, the cause lands in the panel and a Retry button runs the boot again, instead of toggling the plugin off and on.
 - **Bilingual panel** — copy goes through DSH's locale service, with `zh` and `en` both shipped.
@@ -258,6 +258,7 @@ Configuration goes on the plugin row (the one in a profile's `cordis.patch.yml`)
 | `providerMaxTokens` | number | `32768` | The same, for the output cap |
 | `providerReasoningEfforts` | string | `off,low,medium,high,xhigh,max` | Declared thinking levels; empty declares none at all |
 | `providerImageModels` | string | empty | Models declared image-capable; `*` and `!` exclusions supported, highest precedence |
+| `providerModelAliases` | string | empty | `served-id=catalog-id` pairs saying which model the catalogs describe under another id; outranks the plugin's own pairings |
 | `providerDefaultInput` | string | `text,image` | Input types a model nothing describes gets |
 
 Example — pin the gateway to an existing instance and skip the panel question:
@@ -278,6 +279,13 @@ Example — upstreams are mostly text models, so declare no thinking levels:
     providerReasoningEfforts: ''
     providerImageModels: '!deepseek-chat'
     providerDefaultInput: 'text'
+```
+
+Example — the gateway resells a model under a relay's own id, so say which model that is:
+
+```yaml
+  config:
+    providerModelAliases: 'relay-model-x=glm-5.3, another-relay-id=deepseek-v4-pro'
 ```
 
 ## The panel
@@ -339,7 +347,7 @@ Publishing performs the same two writes the web Models page performs by hand:
 
 Two things worth knowing:
 
-- **The gateway's model list is the only source of truth.** A model the token cannot reach is never advertised, and every start and every Sync models replaces the whole route — so a per-model edit made on the DSH side does not survive. Edit it in the console instead.
+- **The gateway's model list is the only source of truth.** A model the token cannot reach is never advertised, and every start and every Sync models replaces the whole model list — so adding or removing models is done in the console, not on the DSH side. The two capacity fields are the one exception: a context window or output cap already stated for a model is kept whenever the catalogs state nothing, because a gateway serving a relay's own model id (`deepseek-v4.1-flash`, say) matches no catalog and the number you typed is the only answer there is.
 - **No models is a refusal, not an empty route.** A brand-new gateway has no channel yet, and the plugin reports "the gateway serves no models yet" rather than registering a route with nothing behind it. Add a channel in the console, then press Sync models.
 
 Neither request modalities nor capacities are on New API's `/v1/models`, so the plugin asks, in this order:
@@ -358,7 +366,7 @@ providerDefaultInput (default text,image — the models in this gateway were add
                       and only the plugin row can undo a refusal)
 ```
 
-Capacities come from the model catalogs alone (`/v1/models` carries no token limit at all): a model the catalogs describe keeps its own context window and output cap, with the **smallest** value winning when sources disagree; anything else falls back to the route's `providerContextWindow` / `providerMaxTokens`, and the log names which models took the guess.
+Capacities come from the model catalogs alone (`/v1/models` carries no token limit at all): a model the catalogs describe keeps its own context window and output cap, with the **smallest** value winning when sources disagree. A model the gateway serves under a relay's own id reaches those numbers through an **alias** — `deepseek-v4.1-flash` is `deepseek-flash`, the id llm-deepseek ships it under, paired in the plugin and overridable with `providerModelAliases` — so the first sync already carries them and nothing has to be typed. A field no catalog states and no alias reaches keeps the number that route already carries (the one you typed on the model's row), because deleting it would silently revert the model to the route's guess. Only a model that carries none of those falls back to `providerContextWindow` / `providerMaxTokens`, and the log names which models took the guess, which kept their own numbers, and which took an alias's.
 
 ## Files and directories
 
@@ -447,7 +455,7 @@ The binary comes from the official [QuantumNous/new-api](https://github.com/Quan
 | Automatic proxy discovery | ✅ | Environment → Windows system proxy → local port probe |
 | First-run setup in the panel | ✅ | Port and root password collected and validated before the database exists |
 | Models published into the DSH model selector | ✅ | `llm-pi-ai` route plus a credential reference; the token never enters the settings document |
-| Image input and capacity resolution | ✅ | Plugin row → console tags → model catalogs, with the smallest capacity winning |
+| Image input and capacity resolution | ✅ | Plugin row → console tags → model catalogs, with the smallest capacity winning, a relay's renamed id followed to the id the catalogs know, and the route's own numbers kept where nothing speaks |
 | Boot phase reporting and failure classification | ✅ | Bytes, speed, ETA, and six classes of failure |
 | Retry from the panel after a failed boot | ✅ | No trip to the Plugins page |
 | Console session bridge | ✅ | Holds a session only for an account a person signed in with |
@@ -506,7 +514,7 @@ It is in `.dsh-gateway.json`, and while the gateway runs you can also read it un
 <details>
 <summary><strong>If I edit a model's context length in DSH, is it overwritten?</strong></summary>
 
-Yes. That route's model list belongs to the gateway and is replaced wholesale on every start and every Sync models. For different numbers, change `providerContextWindow` / `providerMaxTokens` on the plugin row, or rely on the real values the model catalogs state.
+The model list is: that route belongs to the gateway and is replaced on every start and every Sync models, so a model you add or remove on the DSH side is gone after the next sync. The context window and output cap you set on a model's row are kept, though — they are carried over whenever nothing else describes that id. Something usually does describe it: a model a relay renamed is matched to the id the catalogs know through the alias table (`deepseek-v4.1-flash` is `deepseek-flash`), so its row is filled on the very first sync, and `providerModelAliases` on the plugin row adds or corrects a pairing. A catalog fact still wins over the row, so a corrected reading reaches it too. For a number that should apply to every undescribed model at once, use `providerContextWindow` / `providerMaxTokens` on the plugin row.
 
 </details>
 
